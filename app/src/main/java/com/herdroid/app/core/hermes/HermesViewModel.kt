@@ -3,6 +3,8 @@ package com.herdroid.app.core.hermes
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.herdroid.app.core.runtime.BotModeController
+import com.herdroid.app.core.runtime.HermesRuntimeHost
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -12,10 +14,13 @@ import java.util.UUID
 
 class HermesViewModel(application: Application) : AndroidViewModel(application) {
     private val configStore = ProviderConfigStore(application)
-    private val runtime: HermesRuntime = LocalHermesRuntime(application.filesDir)
+    private val runtime: HermesRuntime = HermesRuntimeHost.get(application)
 
     private val mutableUi = MutableStateFlow(
-        HermesUiState(provider = configStore.load()),
+        HermesUiState(
+            provider = configStore.load(),
+            botModeEnabled = BotModeController.isEnabled(application),
+        ),
     )
     val ui: StateFlow<HermesUiState> = mutableUi.asStateFlow()
     val runtimeState: StateFlow<RuntimeState> = runtime.state
@@ -26,7 +31,12 @@ class HermesViewModel(application: Application) : AndroidViewModel(application) 
         }
         viewModelScope.launch {
             val config = mutableUi.value.provider
-            if (config.isConfigured) runtime.start(config)
+            if (config.isConfigured && runtime.state.value == RuntimeState.Stopped) {
+                runtime.start(config)
+            }
+        }
+        if (mutableUi.value.botModeEnabled) {
+            BotModeController.start(application)
         }
     }
 
@@ -72,10 +82,17 @@ class HermesViewModel(application: Application) : AndroidViewModel(application) 
             runCatching {
                 runtime.stop()
                 if (config.isConfigured) runtime.start(config)
+                BotModeController.refresh(getApplication())
             }.onFailure { error ->
                 mutableUi.update { it.copy(error = error.message ?: "Failed to start local Hermes runtime") }
             }
         }
+    }
+
+    fun setBotModeEnabled(enabled: Boolean) {
+        val app = getApplication<Application>()
+        BotModeController.setEnabled(app, enabled)
+        mutableUi.update { it.copy(botModeEnabled = enabled) }
     }
 
     fun clearConversation() {
@@ -181,15 +198,12 @@ class HermesViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
     }
-
-    override fun onCleared() {
-        super.onCleared()
-    }
 }
 
 data class HermesUiState(
     val provider: ProviderConfig = ProviderConfig(),
     val providerSettingsOpen: Boolean = false,
+    val botModeEnabled: Boolean = false,
     val composer: String = "",
     val messages: List<ChatMessage> = emptyList(),
     val status: String? = null,
