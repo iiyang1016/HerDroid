@@ -9,6 +9,9 @@ WORK_ROOT="$HOME/.cache/herdroid-termux-build"
 WORKSPACE_DIR="$WORK_ROOT/worktree"
 LOG_DIR="$WORK_ROOT/logs"
 
+OUTPUT_DIR="${HERDROID_OUTPUT_DIR:-$HOME/storage/downloads/arc/HerDroid}"
+OUTPUT_APK="$OUTPUT_DIR/HerDroid-debug.apk"
+
 SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/.android-sdk-termux}}"
 
 PLATFORM_VERSION="37.0"
@@ -23,9 +26,8 @@ BUILD_TOOLS_CACHE="$WORK_ROOT/$BUILD_TOOLS_ZIP"
 
 RUN_ID="$(date '+%Y%m%d-%H%M%S')"
 LIVE_LOG="$LOG_DIR/herdroid-build-$RUN_ID.log"
-FAIL_LOG="$SOURCE_DIR/herdroid-build-failed.txt"
-STAMPED_FAIL_LOG="$SOURCE_DIR/herdroid-build-failed-$RUN_ID.txt"
-DOWNLOADS_DIR="$HOME/storage/downloads"
+FAIL_LOG="$OUTPUT_DIR/herdroid-build-failed.txt"
+STAMPED_FAIL_LOG="$OUTPUT_DIR/herdroid-build-failed-$RUN_ID.txt"
 
 APK_PATH=""
 STAGED_BUILD=0
@@ -39,6 +41,24 @@ if [[ "${PREFIX:-}" != *com.termux* ]]; then
 fi
 
 mkdir -p "$LOG_DIR"
+
+prepare_output_dir() {
+    if [[ "$OUTPUT_DIR" == "$HOME/storage/downloads"* ]]; then
+        [[ -d "$HOME/storage/downloads" ]] \
+            || die "Termux shared storage is not available. Run: termux-setup-storage"
+    fi
+
+    mkdir -p "$OUTPUT_DIR" \
+        || die "Could not create output directory: $OUTPUT_DIR"
+
+    local probe="$OUTPUT_DIR/.herdroid-write-test-$$"
+    if ! : > "$probe" 2>/dev/null; then
+        die "Output directory is not writable: $OUTPUT_DIR"
+    fi
+    rm -f "$probe"
+
+    log "Build outputs: $OUTPUT_DIR"
+}
 
 install_packages() {
     local packages=(openjdk-17 gradle aapt aidl curl unzip ca-certificates tar)
@@ -335,15 +355,11 @@ build_app() {
     [[ -f "$APK_PATH" ]] \
         || die "Gradle finished but the expected APK was not found: $APK_PATH"
 
-    if (( STAGED_BUILD == 1 )); then
-        local copied_apk="$SOURCE_DIR/HerDroid-debug.apk"
-        cp -f "$APK_PATH" "$copied_apk"
-        log "Build complete; APK copied back to shared storage"
-        printf '\nAPK: %s\n' "$copied_apk"
-    else
-        log "Build complete"
-        printf '\nAPK: %s\n' "$APK_PATH"
-    fi
+    cp -f "$APK_PATH" "$OUTPUT_APK"
+    [[ -f "$OUTPUT_APK" ]] || die "APK build succeeded but copy to Downloads failed: $OUTPUT_APK"
+
+    log "Build complete"
+    printf '\nAPK: %s\n' "$OUTPUT_APK"
 }
 
 write_failure_report() {
@@ -362,6 +378,7 @@ write_failure_report() {
         printf 'Source: %s\n' "$SOURCE_DIR"
         printf 'Source real path: %s\n' "$SOURCE_REAL_DIR"
         printf 'Build workspace: %s\n' "$expected_workspace"
+        printf 'Output directory: %s\n' "$OUTPUT_DIR"
         printf 'SDK root: %s\n' "$SDK_ROOT"
         printf 'PREFIX: %s\n' "${PREFIX:-unset}"
 
@@ -397,15 +414,6 @@ write_failure_report() {
 
     printf '\n\033[1;31m[HerDroid]\033[0m Build failed. Full report saved to:\n%s\n' "$FAIL_LOG" >&2
     printf 'Timestamped copy: %s\n' "$STAMPED_FAIL_LOG" >&2
-
-    if [[ -d "$DOWNLOADS_DIR" && -w "$DOWNLOADS_DIR" ]]; then
-        local download_copy="$DOWNLOADS_DIR/HerDroid-build-failed-$RUN_ID.txt"
-        cp -f "$FAIL_LOG" "$download_copy" 2>/dev/null || true
-
-        if [[ -f "$download_copy" ]]; then
-            printf 'Downloads copy: %s\n' "$download_copy" >&2
-        fi
-    fi
 }
 
 main() {
@@ -421,7 +429,10 @@ main() {
 
 run_logged() {
     local status
-    rm -f "$FAIL_LOG"
+
+    prepare_output_dir
+
+    rm -f "$FAIL_LOG" "$OUTPUT_APK"
 
     set +e
     (
