@@ -20,6 +20,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.herdroid.app.core.hermes.ChatMessage
@@ -28,25 +29,31 @@ import com.herdroid.app.core.hermes.RuntimeState
 import com.herdroid.app.core.terminal.TerminalController
 import kotlinx.coroutines.launch
 
-private enum class WorkspaceTab(val label: String) {
+private enum class ShellPage(val label: String) {
     Chat("Chat"),
+    Skills("Skills"),
+    Messaging("Messaging"),
+    Artifacts("Artifacts"),
+}
+
+private enum class WorkspacePane(val label: String) {
     Terminal("Terminal"),
     Browser("Browser"),
 }
 
 @Composable
 fun HerDroidApp(viewModel: HermesViewModel = viewModel()) {
-    var tab by remember { mutableStateOf(WorkspaceTab.Chat) }
+    var page by remember { mutableStateOf(ShellPage.Chat) }
 
     MaterialTheme {
         Scaffold(
             contentWindowInsets = WindowInsets.safeDrawing,
             bottomBar = {
                 NavigationBar(windowInsets = WindowInsets.navigationBars) {
-                    WorkspaceTab.entries.forEach { item ->
+                    ShellPage.entries.forEach { item ->
                         NavigationBarItem(
-                            selected = tab == item,
-                            onClick = { tab = item },
+                            selected = page == item,
+                            onClick = { page = item },
                             icon = { Text(item.label.take(1), fontWeight = FontWeight.Bold) },
                             label = { Text(item.label) },
                         )
@@ -55,11 +62,18 @@ fun HerDroidApp(viewModel: HermesViewModel = viewModel()) {
             },
         ) { padding ->
             Column(Modifier.fillMaxSize().padding(padding)) {
-                ProductHeader(tab)
-                when (tab) {
-                    WorkspaceTab.Chat -> ChatWorkspace(viewModel)
-                    WorkspaceTab.Terminal -> TerminalWorkspace()
-                    WorkspaceTab.Browser -> BrowserWorkspace()
+                ProductHeader(page)
+                when (page) {
+                    ShellPage.Chat -> ChatWorkspace(viewModel)
+                    ShellPage.Skills -> PlaceholderPage(
+                        title = "Skills",
+                        body = "Hermes skills will live here. The Android port will use the same skills surface and installed-skill model as Hermes Desktop.",
+                    )
+                    ShellPage.Messaging -> MessagingWorkspace(viewModel)
+                    ShellPage.Artifacts -> PlaceholderPage(
+                        title = "Artifacts",
+                        body = "Artifacts produced by Hermes will appear here. This destination mirrors the durable Artifacts surface in Hermes Desktop.",
+                    )
                 }
             }
         }
@@ -67,13 +81,23 @@ fun HerDroidApp(viewModel: HermesViewModel = viewModel()) {
 }
 
 @Composable
-private fun ProductHeader(tab: WorkspaceTab) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp)) {
-        Text("HerDroid", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+private fun ProductHeader(page: ShellPage) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column {
+            Text("HerDroid", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+            Text(
+                page.label,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Text(
-            "Standalone Hermes workstation · ${tab.label}",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            "Local",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
         )
     }
     HorizontalDivider()
@@ -84,6 +108,7 @@ private fun ChatWorkspace(viewModel: HermesViewModel) {
     val ui by viewModel.ui.collectAsStateWithLifecycle()
     val runtime by viewModel.runtimeState.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
+    var workspacePane by remember { mutableStateOf<WorkspacePane?>(null) }
 
     if (ui.providerSettingsOpen) {
         ProviderSettingsDialog(
@@ -100,6 +125,10 @@ private fun ChatWorkspace(viewModel: HermesViewModel) {
         )
     }
 
+    workspacePane?.let { pane ->
+        WorkspaceDialog(pane = pane, onDismiss = { workspacePane = null })
+    }
+
     LaunchedEffect(ui.messages.size, ui.messages.lastOrNull()?.text) {
         if (ui.messages.isNotEmpty()) listState.scrollToItem(ui.messages.lastIndex)
     }
@@ -111,13 +140,15 @@ private fun ChatWorkspace(viewModel: HermesViewModel) {
             configured = ui.provider.isConfigured,
             onSettings = viewModel::openProviderSettings,
             onClear = viewModel::clearConversation,
+            onTerminal = { workspacePane = WorkspacePane.Terminal },
+            onBrowser = { workspacePane = WorkspacePane.Browser },
         )
 
         LazyColumn(
             modifier = Modifier.weight(1f).fillMaxWidth(),
             state = listState,
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             if (ui.messages.isEmpty()) {
                 item {
@@ -147,6 +178,7 @@ private fun ChatWorkspace(viewModel: HermesViewModel) {
             )
         }
 
+        HorizontalDivider()
         Row(
             Modifier.fillMaxWidth().padding(12.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -177,26 +209,110 @@ private fun RuntimeStrip(
     configured: Boolean,
     onSettings: () -> Unit,
     onClear: () -> Unit,
+    onTerminal: () -> Unit,
+    onBrowser: () -> Unit,
 ) {
     Column(
-        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Column(Modifier.weight(1f)) {
-                Text("Local runtime · ${runtime.name}", fontWeight = FontWeight.SemiBold)
-                Text(
-                    if (configured) model else "Model provider not configured",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                )
+                Text("${runtime.name} · ${if (configured) model else "No model"}", style = MaterialTheme.typography.bodySmall)
             }
+            TextButton(onClick = onTerminal) { Text("Terminal") }
+            TextButton(onClick = onBrowser) { Text("Browser") }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             TextButton(onClick = onClear) { Text("Clear") }
-            FilledTonalButton(onClick = onSettings) { Text("Provider") }
+            TextButton(onClick = onSettings) { Text("Provider") }
         }
     }
     HorizontalDivider()
+}
+
+@Composable
+private fun MessagingWorkspace(viewModel: HermesViewModel) {
+    val ui by viewModel.ui.collectAsStateWithLifecycle()
+    val runtime by viewModel.runtimeState.collectAsStateWithLifecycle()
+
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        item {
+            Text("Messaging", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Run Hermes as an always-on bot from this phone. The foreground runtime stays local to HerDroid and will host the same messaging adapters and per-chat sessions as Hermes.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Column(Modifier.weight(1f)) {
+                    Text("Bot Mode", fontWeight = FontWeight.Medium)
+                    Text(
+                        if (ui.botModeEnabled) "Active · ${runtime.name}" else "Off",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = ui.botModeEnabled,
+                    onCheckedChange = viewModel::setBotModeEnabled,
+                )
+            }
+        }
+        item { HorizontalDivider() }
+        item {
+            Text("Platforms", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Telegram and Discord are the first Android adapters. Platform credentials, connection state, pairing requests, and approved users will use this surface as they are wired to the embedded Hermes messaging core.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (!ui.provider.isConfigured) {
+            item {
+                TextButton(onClick = viewModel::openProviderSettings) { Text("Configure model provider") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlaceholderPage(title: String, body: String) {
+    Column(
+        Modifier.fillMaxSize().padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+        Text(body, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun WorkspaceDialog(pane: WorkspacePane, onDismiss: () -> Unit) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxSize()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(pane.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    TextButton(onClick = onDismiss) { Text("Close") }
+                }
+                HorizontalDivider()
+                when (pane) {
+                    WorkspacePane.Terminal -> TerminalWorkspace()
+                    WorkspacePane.Browser -> BrowserWorkspace()
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -204,14 +320,18 @@ private fun EmptyChatState(configured: Boolean, onSettings: () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(
             if (configured) {
-                "Hermes is running locally inside HerDroid. Chat requests go directly from this app to your configured model provider; no Hermes gateway is required."
+                "Hermes is ready locally."
             } else {
-                "Set a model provider once, then HerDroid runs the local agent directly. No Hermes gateway or external Termux session is required."
+                "Configure a model provider to start Hermes."
             },
+            style = MaterialTheme.typography.titleMedium,
+        )
+        Text(
+            "The agent runs inside HerDroid; no external Hermes gateway is required.",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         if (!configured) {
-            Button(onClick = onSettings) { Text("Configure provider") }
+            TextButton(onClick = onSettings) { Text("Configure provider") }
         }
     }
 }
@@ -231,14 +351,9 @@ private fun ProviderSettingsDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Local Hermes provider") },
+        title = { Text("Model provider") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    "OpenAI-compatible endpoint. OpenRouter is the default, but local/network providers can be used too.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
                 OutlinedTextField(
                     value = baseUrl,
                     onValueChange = onBaseUrl,
@@ -270,7 +385,7 @@ private fun ProviderSettingsDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Text(
-                    "The API key is encrypted with Android Keystore before being stored on-device.",
+                    "API keys are encrypted with Android Keystore on-device.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -278,7 +393,7 @@ private fun ProviderSettingsDialog(
         },
         confirmButton = {
             Button(onClick = onSave, enabled = baseUrl.isNotBlank() && model.isNotBlank()) {
-                Text("Save & start")
+                Text("Save")
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
@@ -288,26 +403,16 @@ private fun ProviderSettingsDialog(
 @Composable
 private fun MessageBubble(message: ChatMessage) {
     val isUser = message.role == ChatMessage.Role.User
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
-    ) {
-        Surface(
-            tonalElevation = if (isUser) 2.dp else 0.dp,
-            shape = MaterialTheme.shapes.medium,
-            modifier = Modifier.fillMaxWidth(if (isUser) 0.86f else 0.96f),
-        ) {
-            SelectionContainer {
-                Column(Modifier.padding(12.dp)) {
-                    Text(
-                        if (isUser) "You" else "Hermes",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(message.text.ifEmpty { if (message.streaming) "…" else "" })
-                }
-            }
+    Column(Modifier.fillMaxWidth()) {
+        Text(
+            if (isUser) "You" else "Hermes",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(4.dp))
+        SelectionContainer {
+            Text(message.text.ifEmpty { if (message.streaming) "…" else "" })
         }
     }
 }
@@ -361,12 +466,6 @@ private fun TerminalWorkspace() {
                 Text(if (running) "Running" else "Run")
             }
         }
-        Text(
-            "Runs inside HerDroid's app sandbox. The local agent can call the same shell tool.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 8.dp),
-        )
     }
 }
 
