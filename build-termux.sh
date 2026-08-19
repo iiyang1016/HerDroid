@@ -9,6 +9,11 @@ PLATFORM_SHA256="19bdcf42de0cb0e9500a27da6833fc30cdd49a7ec690aa5cabaa0ef893af9eb
 PLATFORM_URL="https://dl.google.com/android/repository/${PLATFORM_ZIP}"
 BUILD_TOOLS_VERSION="36.0.0"
 APK_PATH="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+RUN_ID="$(date '+%Y%m%d-%H%M%S')"
+LIVE_LOG="$PROJECT_DIR/.herdroid-build-$RUN_ID.log"
+FAIL_LOG="$PROJECT_DIR/herdroid-build-failed.txt"
+STAMPED_FAIL_LOG="$PROJECT_DIR/herdroid-build-failed-$RUN_ID.txt"
+DOWNLOADS_DIR="$HOME/storage/downloads"
 
 log() { printf '\n\033[1;34m[HerDroid]\033[0m %s\n' "$*"; }
 die() { printf '\n\033[1;31m[HerDroid]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -134,6 +139,8 @@ build_app() {
             --max-workers=1 \
             --no-parallel \
             --no-configuration-cache \
+            --stacktrace \
+            --info \
             -Dorg.gradle.jvmargs="-Xmx$heap -Dfile.encoding=UTF-8" \
             -Pandroid.aapt2FromMavenOverride="$PREFIX/bin/aapt2"
     fi
@@ -144,6 +151,8 @@ build_app() {
         --no-parallel \
         --no-configuration-cache \
         --stacktrace \
+        --info \
+        --warning-mode all \
         -Dorg.gradle.jvmargs="-Xmx$heap -Dfile.encoding=UTF-8" \
         -Pkotlin.compiler.execution.strategy=in-process \
         -Pandroid.aapt2FromMavenOverride="$PREFIX/bin/aapt2"
@@ -151,6 +160,47 @@ build_app() {
     [[ -f "$APK_PATH" ]] || die "Gradle finished but the expected APK was not found: $APK_PATH"
     log "Build complete"
     printf '\nAPK: %s\n' "$APK_PATH"
+}
+
+write_failure_report() {
+    local status="$1"
+    {
+        printf 'HerDroid Termux build failure report\n'
+        printf '===================================\n'
+        printf 'Exit code: %s\n' "$status"
+        printf 'Timestamp: %s\n' "$(date -Iseconds 2>/dev/null || date)"
+        printf 'Project: %s\n' "$PROJECT_DIR"
+        printf 'SDK root: %s\n' "$SDK_ROOT"
+        printf 'PREFIX: %s\n' "${PREFIX:-unset}"
+        printf '\n--- Device / environment ---\n'
+        uname -a 2>&1 || true
+        if command -v termux-info >/dev/null 2>&1; then
+            termux-info 2>&1 || true
+        fi
+        printf '\n--- Java ---\n'
+        java -version 2>&1 || true
+        printf '\n--- Gradle ---\n'
+        gradle --version 2>&1 || true
+        printf '\n--- Android tools ---\n'
+        aapt2 version 2>&1 || true
+        printf '\n--- Full build output ---\n'
+        cat "$LIVE_LOG" 2>/dev/null || true
+    } > "$FAIL_LOG"
+
+    cp -f "$FAIL_LOG" "$STAMPED_FAIL_LOG" 2>/dev/null || true
+
+    printf '\n\033[1;31m[HerDroid]\033[0m Build failed. Full report saved to:\n%s\n' "$FAIL_LOG" >&2
+    printf 'Timestamped copy: %s\n' "$STAMPED_FAIL_LOG" >&2
+
+    if [[ -d "$DOWNLOADS_DIR" && -w "$DOWNLOADS_DIR" ]]; then
+        local download_copy="$DOWNLOADS_DIR/HerDroid-build-failed-$RUN_ID.txt"
+        cp -f "$FAIL_LOG" "$download_copy" 2>/dev/null || true
+        if [[ -f "$download_copy" ]]; then
+            printf 'Downloads copy: %s\n' "$download_copy" >&2
+        fi
+    else
+        printf 'Tip: run termux-setup-storage once if you want an automatic copy in Downloads.\n' >&2
+    fi
 }
 
 main() {
@@ -162,4 +212,24 @@ main() {
     build_app "${1:-}"
 }
 
-main "$@"
+run_logged() {
+    local status
+    rm -f "$FAIL_LOG"
+
+    set +e
+    (
+        set -Eeuo pipefail
+        main "$@"
+    ) 2>&1 | tee "$LIVE_LOG"
+    status=${PIPESTATUS[0]}
+    set -e
+
+    if (( status != 0 )); then
+        write_failure_report "$status"
+        exit "$status"
+    fi
+
+    rm -f "$LIVE_LOG"
+}
+
+run_logged "$@"
