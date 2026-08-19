@@ -11,3 +11,7 @@ local.properties
 *.aab
 *.jks
 *.keystore
+
+# Generated from the pinned upstream Hermes Desktop Vite renderer.
+# Recreate locally with ./sync-hermes-ui.sh.
+app/src/main/assets/hermes/
