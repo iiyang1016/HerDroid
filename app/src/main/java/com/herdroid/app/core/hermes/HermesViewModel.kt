@@ -1,66 +1,126 @@
 package com.herdroid.app.core.hermes
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import org.json.JSONObject
 import java.util.UUID
 
-class HermesViewModel : ViewModel() {
-    private val gateway = HermesGatewayClient()
-    private val mutableUi = MutableStateFlow(HermesUiState())
+class HermesViewModel(application: Application) : AndroidViewModel(application) {
+    private val configStore = ProviderConfigStore(application)
+    private val runtime: HermesRuntime = LocalHermesRuntime(application.filesDir)
+
+    private val mutableUi = MutableStateFlow(
+        HermesUiState(provider = configStore.load()),
+    )
     val ui: StateFlow<HermesUiState> = mutableUi.asStateFlow()
-    val connectionState: StateFlow<GatewayConnectionState> = gateway.state
-    private var runtimeSessionId: String? = null
+    val runtimeState: StateFlow<RuntimeState> = runtime.state
 
-    init { viewModelScope.launch { gateway.events.collect { handleEvent(it) } } }
-
-    fun updateEndpoint(value: String) = mutableUi.update { it.copy(endpoint = value) }
-    fun updateToken(value: String) = mutableUi.update { it.copy(token = value) }
-    fun updateComposer(value: String) = mutableUi.update { it.copy(composer = value) }
-
-    fun connect() {
-        runtimeSessionId = null
-        mutableUi.update { it.copy(error = null) }
-        gateway.connect(HermesGatewayConfig(ui.value.endpoint, ui.value.token))
+    init {
+        viewModelScope.launch {
+            runtime.events.collect(::handleEvent)
+        }
+        viewModelScope.launch {
+            val config = mutableUi.value.provider
+            if (config.isConfigured) runtime.start(config)
+        }
     }
 
-    fun disconnect() { runtimeSessionId = null; gateway.close() }
+    fun updateComposer(value: String) = mutableUi.update { it.copy(composer = value) }
+
+    fun openProviderSettings() = mutableUi.update { it.copy(providerSettingsOpen = true) }
+    fun closeProviderSettings() = mutableUi.update { it.copy(providerSettingsOpen = false) }
+
+    fun updateProviderBaseUrl(value: String) = mutableUi.update {
+        it.copy(provider = it.provider.copy(baseUrl = value))
+    }
+
+    fun updateProviderModel(value: String) = mutableUi.update {
+        it.copy(provider = it.provider.copy(model = value))
+    }
+
+    fun updateProviderApiKey(value: String) = mutableUi.update {
+        it.copy(provider = it.provider.copy(apiKey = value))
+    }
+
+    fun updateProviderMaxIterations(value: String) {
+        val parsed = value.toIntOrNull()?.coerceIn(1, 32) ?: return
+        mutableUi.update { it.copy(provider = it.provider.copy(maxIterations = parsed)) }
+    }
+
+    fun saveProvider() {
+        val config = mutableUi.value.provider.copy(
+            baseUrl = mutableUi.value.provider.baseUrl.trim().trimEnd('/'),
+            model = mutableUi.value.provider.model.trim(),
+            apiKey = mutableUi.value.provider.apiKey.trim(),
+        )
+
+        mutableUi.update {
+            it.copy(
+                provider = config,
+                providerSettingsOpen = false,
+                error = null,
+            )
+        }
+        configStore.save(config)
+
+        viewModelScope.launch {
+            runCatching {
+                runtime.stop()
+                if (config.isConfigured) runtime.start(config)
+            }.onFailure { error ->
+                mutableUi.update { it.copy(error = error.message ?: "Failed to start local Hermes runtime") }
+            }
+        }
+    }
+
+    fun clearConversation() {
+        mutableUi.update {
+            it.copy(messages = emptyList(), status = null, error = null)
+        }
+    }
 
     fun send() {
         val text = ui.value.composer.trim()
         if (text.isEmpty()) return
-        mutableUi.update { it.copy(
-            composer = "",
-            error = null,
-            messages = it.messages + ChatMessage(UUID.randomUUID().toString(), ChatMessage.Role.User, text),
-        ) }
+        if (!ui.value.provider.isConfigured) {
+            mutableUi.update { it.copy(providerSettingsOpen = true, error = "Configure a model provider first") }
+            return
+        }
+
+        val userMessage = ChatMessage(
+            id = UUID.randomUUID().toString(),
+            role = ChatMessage.Role.User,
+            text = text,
+        )
+
+        val history = ui.value.messages + userMessage
+        mutableUi.update {
+            it.copy(
+                composer = "",
+                error = null,
+                messages = history,
+            )
+        }
+
         viewModelScope.launch {
             runCatching {
-                val sessionId = ensureSession()
-                gateway.request("prompt.submit", JSONObject().put("session_id", sessionId).put("text", text))
-            }.onFailure { e -> mutableUi.update { it.copy(error = e.message ?: "Prompt failed") } }
+                runtime.submit(text, history)
+            }.onFailure { error ->
+                mutableUi.update { it.copy(error = error.message ?: "Prompt failed") }
+            }
         }
-    }
-
-    private suspend fun ensureSession(): String {
-        runtimeSessionId?.let { return it }
-        val created = gateway.request("session.create", JSONObject().put("cols", 100).put("source", "android").put("title", "HerDroid"))
-        return created.optString("session_id").takeIf { it.isNotBlank() }?.also { runtimeSessionId = it }
-            ?: error("Hermes returned no session_id")
     }
 
     private fun handleEvent(event: HermesEvent) {
-        if (event.type == "error") {
-            mutableUi.update { it.copy(error = event.payload ?: "Hermes error") }
-            return
-        }
-        if (event.sessionId != null && runtimeSessionId != null && event.sessionId != runtimeSessionId) return
         when (event.type) {
+            "error" -> mutableUi.update {
+                it.copy(error = event.payload ?: "Hermes error", status = null)
+            }
             "message.start" -> ensureStreamingAssistant()
             "message.delta", "message.interim" -> appendAssistant(event.payload.orEmpty())
             "message.complete" -> finishAssistant(event.payload)
@@ -71,7 +131,14 @@ class HermesViewModel : ViewModel() {
     private fun ensureStreamingAssistant() {
         mutableUi.update { state ->
             if (state.messages.lastOrNull()?.streaming == true) state
-            else state.copy(messages = state.messages + ChatMessage(UUID.randomUUID().toString(), ChatMessage.Role.Assistant, "", true))
+            else state.copy(
+                messages = state.messages + ChatMessage(
+                    id = UUID.randomUUID().toString(),
+                    role = ChatMessage.Role.Assistant,
+                    text = "",
+                    streaming = true,
+                ),
+            )
         }
     }
 
@@ -91,23 +158,38 @@ class HermesViewModel : ViewModel() {
         mutableUi.update { state ->
             val index = state.messages.indexOfLast { it.streaming }
             if (index == -1) {
-                if (finalPayload.isNullOrBlank()) state
-                else state.copy(messages = state.messages + ChatMessage(UUID.randomUUID().toString(), ChatMessage.Role.Assistant, finalPayload))
+                if (finalPayload.isNullOrBlank()) {
+                    state.copy(status = null)
+                } else {
+                    state.copy(
+                        messages = state.messages + ChatMessage(
+                            id = UUID.randomUUID().toString(),
+                            role = ChatMessage.Role.Assistant,
+                            text = finalPayload,
+                        ),
+                        status = null,
+                    )
+                }
             } else {
                 val copy = state.messages.toMutableList()
                 val current = copy[index]
-                copy[index] = current.copy(text = current.text.ifBlank { finalPayload.orEmpty() }, streaming = false)
+                copy[index] = current.copy(
+                    text = current.text.ifBlank { finalPayload.orEmpty() },
+                    streaming = false,
+                )
                 state.copy(messages = copy, status = null)
             }
         }
     }
 
-    override fun onCleared() { gateway.close(); super.onCleared() }
+    override fun onCleared() {
+        super.onCleared()
+    }
 }
 
 data class HermesUiState(
-    val endpoint: String = "ws://127.0.0.1:8642/api/ws",
-    val token: String = "",
+    val provider: ProviderConfig = ProviderConfig(),
+    val providerSettingsOpen: Boolean = false,
     val composer: String = "",
     val messages: List<ChatMessage> = emptyList(),
     val status: String? = null,
